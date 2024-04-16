@@ -1,0 +1,41 @@
+declare "k8s_services" {
+  argument "cluster" {
+    optional = false
+  }
+
+  declare "k8s_cluster" {
+    argument "host" {
+      optional = false
+    }
+
+    export "url" {
+      value = "https://" + argument.host.value + ":16443/api/v1"
+    }
+  }
+
+  k8s_cluster "cluster" {
+    host = argument.cluster.value
+  }
+  export "prometheus" {
+    value = k8s_cluster.cluster.url + "/namespaces/observability/services/kube-prom-stack-prometheus-node-exporter:http-metrics"
+  }
+  export "loki" {
+    value = k8s_cluster.cluster.url + "/namespaces/observability/services/loki:http-metrics"
+  }
+/*
+  tempo ports:
+    - name: tempo-prom-metrics
+    - name: jaeger-metrics
+    - name: tempo-query-jaeger-ui
+    - name: tempo-jaeger-thrift-compact
+    - name: tempo-jaeger-thrift-binary
+    - name: tempo-jaeger-thrift-http
+    - name: grpc-tempo-jaeger
+    - name: tempo-zipkin
+    - name: tempo-otlp-legacy
+    - name: tempo-otlp-http-legacy
+    - name: grpc-tempo-otlp
+    - name: tempo-otlp-http
+    - name: tempo-opencensus
+*/
+}

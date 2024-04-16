@@ -1,0 +1,50 @@
+
+services:
+    alloy:
+        container_name: grafana-alloy
+        dns: 10.3.1.4
+        dns_search:
+            - ubuntu.home
+            - home
+        environment:
+            AGENT_MODE: flow
+            CONFIG_FILE_PATH:  /etc/agent/config.river
+        hostname: agent.s3.home
+        image: ${DOCKER_REGISTRY:-s2.ubuntu.home:5000/}docker.io/grafana/alloy:v1.0.0
+        command:
+            - run
+            - --server.http.listen-addr=0.0.0.0:12345
+            - /etc/agent/config.river
+        logging:
+            driver: json-file
+            options:
+                max-file: "3"
+                max-size: "10m"
+        networks:
+            - grafana-net
+        ports:
+            - "12345:12345"
+            - "51893:51893/tcp"
+            - "51893:51898/udp"
+        restart: unless-stopped
+        secrets:
+            - credentials
+        volumes:
+            - ./config.river:/etc/agent/config.river
+            - ./systems.river:/etc/agent/systems.river
+            - ./wal_data:/etc/agent/data
+            - ./data:/run/udev/data
+            - /var/run/journal:/var/run/journal
+            - /run/docker.sock:/run/docker.sock
+            - .:/opt
+
+networks:
+   grafana-net:
+       ipam:
+           config:
+               - subnet: 172.30.1.0/24
+       name: grafana-alloy
+
+secrets:
+   credentials:
+     file: /home/bobb/.inf/credentials.json

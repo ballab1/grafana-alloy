@@ -1,0 +1,392 @@
+
+import.file "systems" {
+  filename = "/etc/agent/systems.river"
+}
+
+systems.k8s_services "prod" {
+  cluster = "10.3.1.14"
+}
+
+systems.k8s_services "dev" {
+  cluster = "10.3.1.12"
+}
+
+local.file "secrets" {
+  filename = "/run/secrets/credentials.json"
+  is_secret = true
+}
+
+logging {
+  format = "logfmt"
+  level  = "info"
+  write_to = [ loki.write.default.receiver ]
+}
+
+tracing {
+  sampling_fraction = 0.1
+  write_to = [ otelcol.exporter.otlp.default.input ]
+}
+
+//=================================================================
+prometheus.remote_write "default" {
+  endpoint {
+    name = "hosted-prometheus"
+    url = "https://prometheus-prod-10-prod-us-central-0.grafana.net/api/prom/push"
+    basic_auth {
+      username = json_path(local.file.secrets.content, ".prometeus.value.username")[0]
+      password = json_path(local.file.secrets.content, ".prometeus.value.password")[0]
+    }
+    queue_config { }
+    metadata_config { }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "https://logs-prod-us-central1.grafana.net/loki/api/v1/push"
+    basic_auth {
+      username = json_path(local.file.secrets.content, ".loki.value.username")[0]
+      password = json_path(local.file.secrets.content, ".loki.value.password")[0]
+    }
+  }
+}
+
+otelcol.auth.basic "grafana_cloud_tempo" {
+  username = json_path(local.file.secrets.content, ".otelcol.value.username")[0]
+  password = json_path(local.file.secrets.content, ".otelcol.value.password")[0]
+}
+
+otelcol.exporter.otlp "default" {
+    client {
+        endpoint = "tempo-us-central1.grafana.net:443"
+        auth     = otelcol.auth.basic.grafana_cloud_tempo.handler
+    }
+}
+otelcol.exporter.otlphttp "default" {
+    client {
+        endpoint = "https://otlp-gateway-prod-us-central-0.grafana.net/otlp"
+        auth     = otelcol.auth.basic.grafana_cloud_tempo.handler
+    }
+}
+
+//=================================================================
+discovery.docker "s3" {
+  host = "unix:///run/docker.sock"
+}
+loki.source.docker "s3_docker" {
+  host       = "unix:///run/docker.sock"
+  targets    = discovery.docker.s3.targets
+  forward_to = [ loki.write.default.receiver ]
+  labels     = { component = "loki.source.docker" }
+  relabel_rules = loki.relabel.s3_docker.rules
+}
+loki.relabel "s3_docker" {
+  forward_to = []
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "instance"
+  }
+}
+//prometheus.scrape "s3_docker" {
+//  forward_to = [ prometheus.remote_write.default.receiver ]
+//  job_name = "s3-docker"
+//  targets = discovery.docker.s3.targets
+//}
+
+//=================================================================
+loki.source.journal "s3_read"  {
+  format_as_json = true
+  forward_to    = [ loki.write.default.receiver ]
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { component = "loki.source.journal" }
+  path = "/var/run/journal"
+}
+loki.relabel "journal" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal__boot_id"]
+    target_label  = "boot_id"
+  }
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+  rule {
+    source_labels = ["__journal__hostname"]
+    target_label  = "instance"
+  }
+}
+
+//=================================================================
+//discovery.file "syslog" {
+//  files = [ "/var/log/syslog" ]
+//}
+//prometheus.scrape "s3_syslog" {
+//  forward_to = [ prometheus.remote_write.default.receiver ]
+//  job_name = "s3-syslog"
+//  targets = discovery.file.syslog.targets
+//}
+local.file_match "logs" {
+  path_targets = [
+    { __path__ = "/var/log/syslog" },
+  ]
+}
+loki.source.file "s3_logs" {
+  targets    = local.file_match.logs.targets
+  forward_to = [ loki.write.default.receiver ]
+}
+
+//================================================================= provide syslog endpoint
+loki.source.syslog "local" {
+  listener {
+    address  = "localhost:51893"
+    labels   = { component = "loki.source.syslog", protocol = "tcp" }
+  }
+  listener {
+    address  = "localhost:51898"
+    protocol = "udp"
+    labels   = { component = "loki.source.syslog", protocol = "udp"}
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+//=================================================================
+prometheus.exporter.self "agent" {
+}
+prometheus.scrape "s3_agent" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-agent"
+  targets = prometheus.exporter.self.agent.targets
+}
+
+//=================================================================
+prometheus.exporter.unix "s3" {
+}
+prometheus.scrape "s3_unix" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-unix"
+  targets = prometheus.exporter.unix.s3.targets
+}
+
+//=================================================================
+prometheus.exporter.kafka "s3" {
+//  kafka_uris = [ env("KAFKA_BOOTSTRAP_SERVERS") ]
+  kafka_uris = [ "s3.ubuntu.home:9092","s7.ubuntu.home:9092","s8.ubuntu.home:9092" ]
+  instance = "localhost:9092"
+}
+prometheus.scrape "s3_kafka" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-kafka"
+  targets = prometheus.exporter.kafka.s3.targets
+}
+/*
+//=================================================================
+prometheus.exporter.mysql "s3" {
+  data_source_name  = "bobb:123Oleary@(localhost:3306)/"
+  enable_collectors = [ "heartbeat", "mysql.user" ]
+}
+prometheus.scrape "s3_mysql" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-mysql"
+  targets = prometheus.exporter.mysql.s3.targets
+}
+*/
+
+//=================================================================
+//=================================================================
+otelcol.exporter.logging "default" {
+    verbosity           = "detailed"
+    sampling_initial    = 1
+    sampling_thereafter = 1
+}
+
+otelcol.exporter.loki "default" {
+  forward_to = [ loki.write.default.receiver ]
+}
+
+otelcol.exporter.prometheus "default" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+}
+
+otelcol.processor.attributes "default" {
+    // Inserts a new attribute "attribute1" to spans where
+    // the key "attribute1" doesn't exist.
+    // The type of `attribute1` is inferred by the configuration.
+    // `123` is an integer and is stored as an integer in the attributes.
+    action {
+        key = "attribute1"
+        value = 123
+        action = "insert"
+    }
+
+    // Inserts a new attribute with a key of "string key" and
+    // a string value of "anotherkey".
+    action {
+        key = "string key"
+        value = "anotherkey"
+        action = "insert"
+    }
+
+    // Setting an attribute on all spans.
+    // Any spans that already had `region` now have value `planet-earth`.
+    // This can be done to set properties for all traces without
+    // requiring an instrumentation change.
+    action {
+        key = "region"
+        value = "planet-earth"
+        action = "upsert"
+    }
+
+    // The following demonstrates copying a value to a new key.
+    // If a span doesn't contain `user_key`, no new attribute `new_user_key` is created.
+    action {
+        key = "new_user_key"
+        from_attribute = "user_key"
+        action = "upsert"
+    }
+
+    // Hashing existing attribute values.
+    action {
+        key = "user.email"
+        action = "hash"
+    }
+
+    // Uses the value from key `example_user_key` to upsert attributes
+    // to the target keys specified in the `pattern`.
+    // (Insert attributes for target keys that do not exist and update keys that exist.)
+    // Given example_user_key = /api/v1/document/12345678/update/v1
+    // then the following attributes will be inserted:
+    // new_example_user_key: 12345678
+    // version: v1
+    //
+    // Note: Similar to the Span Processor, if a target key already exists,
+    // it will be updated.
+    //
+    // Note: The regex pattern is enclosed in backticks instead of quotation marks.
+    // This constitutes a raw River string, and lets us avoid the need to escape backslash characters.
+    action {
+        key = "example_user_key"
+        pattern = `\/api\/v1\/document\/(?P<new_user_key>.*)\/update\/(?P<version>.*)$`
+        action = "extract"
+    }
+
+    // Converting the type of an existing attribute value.
+    action {
+        key = "http.status_code"
+        converted_type = "int"
+        action = "convert"
+    }
+
+    // Deleting keys from an attribute.
+    action {
+        key = "credit_card"
+        action = "delete"
+    }
+
+    output {
+        metrics = [ otelcol.processor.batch.default.input ]
+        logs    = [ otelcol.processor.batch.default.input ]
+        traces  = [ otelcol.processor.batch.default.input ]
+    }
+}
+
+otelcol.processor.batch "default" {
+  timeout = "10s"
+  send_batch_size = 10000
+
+  output {
+    metrics = [ otelcol.exporter.otlp.default.input ]
+    logs    = [ otelcol.exporter.otlp.default.input ]
+    traces  = [ otelcol.exporter.otlp.default.input ]
+  }
+}
+
+/*
+otelcol.processor.transform "default" {
+  error_mode = "ignore"
+  metric_statements {
+    context = "datapoint"
+    statements = [
+      `set(attributes["key1"], resource.attributes["key1"])`,
+      `set(attributes["key2"], resource.attributes["key2"])`,
+    ]
+  }
+  output {
+    metrics = [ otelcol.exporter.prometheus.default.input ]
+  }
+}
+*/
+
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+    metrics = [ otelcol.processor.attributes.default.input ]
+    logs    = [ otelcol.processor.attributes.default.input ]
+    traces  = [ otelcol.processor.attributes.default.input ]
+  }
+}
+
+//=================================================================
+//=================================================================
+/*
+otelcol.processor.attributes "default" {
+  action {
+    key = "loki.attribute.labels"
+    action = "insert"
+    value = "event.domain, event.name"
+  }
+
+  action {
+    key = "loki.resource.labels"
+    action = "insert"
+    value = "service.name, service.namespace"
+  }
+
+  output {
+    metrics = [ otelcol.exporter.otlp.default.input ]
+    logs    = [ otelcol.exporter.otlp.default.input ]
+    traces  = [ otelcol.exporter.otlp.default.input ]
+  }
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    name = "hosted-prometheus-6f9693"
+    url = systems.k8s_services.prod.prometheus + "/api/prom/push"
+    basic_auth {
+      username = "admin"
+      password = "prom-operator"
+    }
+    tls_config {
+      insecure_skip_verify = true
+      cert_pem = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUREekNDQWZlZ0F3SUJBZ0lVTnNlVkNQbWluNnpzdElGYTRWNXVRR0I1eEM4d0RRWUpLb1pJaHZjTkFRRUwKQlFBd0Z6RVZNQk1HQTFVRUF3d01NVEF1TVRVeUxqRTRNeTR4TUI0WERUSXlNRGt4T0RFMk5EUTBNRm9YRFRNeQpNRGt4TlRFMk5EUTBNRm93RnpFVk1CTUdBMVVFQXd3TU1UQXVNVFV5TGpFNE15NHhNSUlCSWpBTkJna3Foa2lHCjl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF1TjNFU0hnVTRCalIwVW4zYzhxc2RUajhqVFFaemNvN210eUwKc3VDZGcvR09CR0M1Qk5FcHRQcmp6ak9DTVlUNmV4bTc2bTEwWlRHaEdpZ0t1SlNjd1BDMC9td1FaQjN5Zmpidwp6YUYvMW50bGJuVDlTcjRvRWJIL09qZDdQMHN3Y0tpYkE3T243NVg4NXlDOTFJU1ladGNkRVhDYWxsVjY0cUMvCmVVLy9KdkpvTmJXN3ZOV3RXWXlQSElzM3lOQktZSndrc2x3MGhSaUxDVitLd0g4SDIzRmFjMzhiZ3d2ZzJUcXEKNFFNWmZsTTY3empQTVA0MUFveTA5bW80NkZhcHRTK3AwczVMMURUZUVndUNIRGhxbklVdUlnSitNZEs1dThxQQpuQWVGWHhVNjY0ZDdFaVdKOWNweEpjQ1h5UDUvalZDYXk3WXpYUHFrSmlHd0ljZHMrUUlEQVFBQm8xTXdVVEFkCkJnTlZIUTRFRmdRVUcxeUwweFpYdVExWXVSZGFiRU93Q2wxeVp5WXdId1lEVlIwakJCZ3dGb0FVRzF5TDB4WlgKdVExWXVSZGFiRU93Q2wxeVp5WXdEd1lEVlIwVEFRSC9CQVV3QXdFQi96QU5CZ2txaGtpRzl3MEJBUXNGQUFPQwpBUUVBUjJCWWlObDVUQUFEak5nSTZjYUQxeDNYNFpCa2ltbVF3OXNhOTduT2NrSk9XdEpVQlVQMXU3WDBpdDNPCmdIRlV2YzJ2eXg0Y0RVMWtWazJpRFltdXEyM2s5ZWdGbnNXUHFjdGN2NThwOTl2enk0VzlIMkx1RmQ0cmNsaEoKSDlXcU5LYm5LMnFmMnRvcU83Um1OdXZ5d2RkNXREUVdNVmFNY2pqNHdJQjk2MEdkemRYQmo5eERaNlBrYmtidQpYNEN6U1RaMEx6aXRjbzd0cjdCVVUvenhyRllLem1YYm9CaStEa082VXhUS05qd1NnRGp6dnk5V1VFcktDSG4vCnk1ckM3Mm51a1BuWEwrVnVhUXFYektrUnBLTjMwOCtTQlhZZTlnZVduNnhyRmg3UE9QNmdIZXJCYzZ0eG5BNUIKeGNmc3ovQ0lROURPSER3QVdBNnlQUTdhTkE9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg=="
+    }
+    queue_config { }
+    metadata_config { }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = systems.k8s_services.prod.loki + "/api/v1/push"
+    basic_auth {
+      username = "bobb"
+      password = "123Oleary"
+    }
+    tls_config {
+      insecure_skip_verify = true
+      cert_pem = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUREekNDQWZlZ0F3SUJBZ0lVTnNlVkNQbWluNnpzdElGYTRWNXVRR0I1eEM4d0RRWUpLb1pJaHZjTkFRRUwKQlFBd0Z6RVZNQk1HQTFVRUF3d01NVEF1TVRVeUxqRTRNeTR4TUI0WERUSXlNRGt4T0RFMk5EUTBNRm9YRFRNeQpNRGt4TlRFMk5EUTBNRm93RnpFVk1CTUdBMVVFQXd3TU1UQXVNVFV5TGpFNE15NHhNSUlCSWpBTkJna3Foa2lHCjl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF1TjNFU0hnVTRCalIwVW4zYzhxc2RUajhqVFFaemNvN210eUwKc3VDZGcvR09CR0M1Qk5FcHRQcmp6ak9DTVlUNmV4bTc2bTEwWlRHaEdpZ0t1SlNjd1BDMC9td1FaQjN5Zmpidwp6YUYvMW50bGJuVDlTcjRvRWJIL09qZDdQMHN3Y0tpYkE3T243NVg4NXlDOTFJU1ladGNkRVhDYWxsVjY0cUMvCmVVLy9KdkpvTmJXN3ZOV3RXWXlQSElzM3lOQktZSndrc2x3MGhSaUxDVitLd0g4SDIzRmFjMzhiZ3d2ZzJUcXEKNFFNWmZsTTY3empQTVA0MUFveTA5bW80NkZhcHRTK3AwczVMMURUZUVndUNIRGhxbklVdUlnSitNZEs1dThxQQpuQWVGWHhVNjY0ZDdFaVdKOWNweEpjQ1h5UDUvalZDYXk3WXpYUHFrSmlHd0ljZHMrUUlEQVFBQm8xTXdVVEFkCkJnTlZIUTRFRmdRVUcxeUwweFpYdVExWXVSZGFiRU93Q2wxeVp5WXdId1lEVlIwakJCZ3dGb0FVRzF5TDB4WlgKdVExWXVSZGFiRU93Q2wxeVp5WXdEd1lEVlIwVEFRSC9CQVV3QXdFQi96QU5CZ2txaGtpRzl3MEJBUXNGQUFPQwpBUUVBUjJCWWlObDVUQUFEak5nSTZjYUQxeDNYNFpCa2ltbVF3OXNhOTduT2NrSk9XdEpVQlVQMXU3WDBpdDNPCmdIRlV2YzJ2eXg0Y0RVMWtWazJpRFltdXEyM2s5ZWdGbnNXUHFjdGN2NThwOTl2enk0VzlIMkx1RmQ0cmNsaEoKSDlXcU5LYm5LMnFmMnRvcU83Um1OdXZ5d2RkNXREUVdNVmFNY2pqNHdJQjk2MEdkemRYQmo5eERaNlBrYmtidQpYNEN6U1RaMEx6aXRjbzd0cjdCVVUvenhyRllLem1YYm9CaStEa082VXhUS05qd1NnRGp6dnk5V1VFcktDSG4vCnk1ckM3Mm51a1BuWEwrVnVhUXFYektrUnBLTjMwOCtTQlhZZTlnZVduNnhyRmg3UE9QNmdIZXJCYzZ0eG5BNUIKeGNmc3ovQ0lROURPSER3QVdBNnlQUTdhTkE9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg=="
+    }
+  }
+}
+*/
