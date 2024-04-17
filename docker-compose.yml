@@ -8,13 +8,13 @@ services:
             - home
         environment:
             AGENT_MODE: flow
-            CONFIG_FILE_PATH:  /etc/agent/config.river
+            CONFIG_FILE_PATH:  /etc/alloy/config.alloy
         hostname: agent.s3.home
         image: ${DOCKER_REGISTRY:-s2.ubuntu.home:5000/}docker.io/grafana/alloy:v1.0.0
         command:
             - run
             - --server.http.listen-addr=0.0.0.0:12345
-            - /etc/agent/config.river
+            - /etc/alloy/config.alloy
         logging:
             driver: json-file
             options:
@@ -28,10 +28,10 @@ services:
             - "51893:51898/udp"
         restart: unless-stopped
         secrets:
-            - credentials
+            - credentials.json
         volumes:
-            - ./config.river:/etc/agent/config.river
-            - ./systems.river:/etc/agent/systems.river
+            - ./config.alloy:/etc/alloy/config.alloy
+            - ./systems.alloy:/etc/alloy/systems.alloy
             - ./wal_data:/etc/agent/data
             - ./data:/run/udev/data
             - /var/run/journal:/var/run/journal
@@ -46,5 +46,5 @@ networks:
        name: grafana-alloy
 
 secrets:
-   credentials:
-     file: /home/bobb/.inf/credentials.json
+   credentials.json:
+     file: /home/bobb/.inf/grafana.secrets.json

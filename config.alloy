@@ -1,0 +1,205 @@
+
+import.file "systems" {
+  filename = "/etc/alloy/systems.alloy"
+}
+
+systems.k8s_services "prod" {
+  cluster = "10.3.1.14"
+}
+
+systems.k8s_services "dev" {
+  cluster = "10.3.1.12"
+}
+
+local.file "secrets" {
+  filename = "/run/secrets/credentials.json"
+}
+
+logging {
+  format = "logfmt"
+  level  = "info"
+  write_to = [ loki.write.default.receiver ]
+}
+
+//=================================================================
+prometheus.remote_write "default" {
+  endpoint {
+    name = "hosted-prometheus"
+    url = "https://prometheus-prod-10-prod-us-central-0.grafana.net/api/prom/push"
+//    name = "K8S-prometheus"
+//    url = systems.k8s_services.prod.prometheus + "/api/prom/push"
+//    tls_config {
+//      insecure_skip_verify = true
+//      cert_pem = json_path(local.file.secrets.content, ".prometheus.cert_pem")[0]
+//    }
+    basic_auth {
+      username = json_path(local.file.secrets.content, ".prometheus.username")[0]
+      password = json_path(local.file.secrets.content, ".prometheus.password")[0]
+    }
+    queue_config { }
+    metadata_config { }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    name = "hosted-loki"
+    url = "https://logs-prod-us-central1.grafana.net/loki/api/v1/push"
+//    name = "k8s-loki"
+//    url = systems.k8s_services.prod.loki + "/api/v1/push"
+//    tls_config {
+//      insecure_skip_verify = true
+//      cert_pem = json_path(local.file.secrets.content, ".loki.cert_pem")[0]
+//    }
+    basic_auth {
+      username = json_path(local.file.secrets.content, ".loki.username")[0]
+      password = json_path(local.file.secrets.content, ".loki.password")[0]
+    }
+  }
+}
+
+//=================================================================
+discovery.docker "s3" {
+  host = "unix:///run/docker.sock"
+}
+loki.source.docker "s3_docker" {
+  host       = "unix:///run/docker.sock"
+  targets    = discovery.docker.s3.targets
+  forward_to = [ loki.write.default.receiver ]
+  labels     = { component = "loki.source.docker" }
+  relabel_rules = loki.relabel.s3_docker.rules
+}
+loki.relabel "s3_docker" {
+  forward_to = []
+  rule {
+    action = "replace"
+    source_labels =  [ "__meta_docker_container_name" ]
+    regex = "/(.*)"
+    target_label = "container"
+  }
+  rule {
+    action = "replace"
+    source_labels = [ "__meta_docker_network_name" ]
+    target_label  = "network_name"
+  }
+  rule {
+    action = "replace"
+    source_labels = [ "__address__" ]
+    target_label  = "address"
+  }
+}
+//prometheus.scrape "s3_docker" {
+//  forward_to = [ prometheus.remote_write.default.receiver ]
+//  job_name = "s3-docker"
+//  targets = discovery.docker.s3.targets
+//}
+
+//=================================================================
+loki.source.journal "s3_read"  {
+  format_as_json = true
+  forward_to    = [ loki.write.default.receiver ]
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { component = "loki.source.journal" }
+  path = "/var/run/journal"
+}
+loki.relabel "journal" {
+  forward_to = []
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal__boot_id"]
+    target_label  = "boot_id"
+  }
+  rule {
+    source_labels = ["__journal__transport"]
+    target_label  = "transport"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+  rule {
+    source_labels = ["__journal__hostname"]
+    target_label  = "instance"
+  }
+}
+
+//=================================================================
+//discovery.file "syslog" {
+//  files = [ "/var/log/syslog" ]
+//}
+//prometheus.scrape "s3_syslog" {
+//  forward_to = [ prometheus.remote_write.default.receiver ]
+//  job_name = "s3-syslog"
+//  targets = discovery.file.syslog.targets
+//}
+local.file_match "logs" {
+  path_targets = [
+    { __path__ = "/var/log/syslog" },
+  ]
+}
+loki.source.file "s3_logs" {
+  targets    = local.file_match.logs.targets
+  forward_to = [ loki.write.default.receiver ]
+}
+
+//================================================================= provide syslog endpoint
+loki.source.syslog "local" {
+  listener {
+    address  = "localhost:51893"
+    labels   = { component = "loki.source.syslog", protocol = "tcp" }
+  }
+  listener {
+    address  = "localhost:51898"
+    protocol = "udp"
+    labels   = { component = "loki.source.syslog", protocol = "udp"}
+  }
+  forward_to = [ loki.write.default.receiver ]
+}
+
+//=================================================================
+prometheus.exporter.self "agent" {
+}
+prometheus.scrape "s3_agent" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-agent"
+  targets = prometheus.exporter.self.agent.targets
+}
+
+//=================================================================
+prometheus.exporter.unix "s3" {
+}
+prometheus.scrape "s3_unix" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-unix"
+  targets = prometheus.exporter.unix.s3.targets
+}
+
+//=================================================================
+prometheus.exporter.kafka "s3" {
+//  kafka_uris = [ env("KAFKA_BOOTSTRAP_SERVERS") ]
+  kafka_uris = [ "s3.ubuntu.home:9092","s7.ubuntu.home:9092","s8.ubuntu.home:9092" ]
+  instance = "localhost:9092"
+}
+prometheus.scrape "s3_kafka" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-kafka"
+  targets = prometheus.exporter.kafka.s3.targets
+}
+/*
+//=================================================================
+prometheus.exporter.mysql "s3" {
+  data_source_name  = json_path(local.file.secrets.content, ".mysql.creds")[0]
+  enable_collectors = [ "heartbeat", "mysql.user" ]
+}
+prometheus.scrape "s3_mysql" {
+  forward_to = [ prometheus.remote_write.default.receiver ]
+  job_name = "s3-mysql"
+  targets = prometheus.exporter.mysql.s3.targets
+}
+*/
+
+//=================================================================
+//=================================================================
